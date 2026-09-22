@@ -1,0 +1,34 @@
+name: Sync AltaCera Catalog
+
+on:
+  schedule:
+    # 02:30 UTC = 05:30 МСК (AltaCera генерит данные в 02:00 МСК, +30 мин буфер)
+    - cron: "30 2 * * *"
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Установка зависимостей
+        run: pip install -r requirements.txt
+
+      - name: Запуск синхронизации
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: python main.py
+
+      - name: Загрузить CSV-бэкап как артефакт
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: old-catalog-backup
+          path: old_catalog_backup_*.csv
+          if-no-files-found: ignore
