@@ -6,7 +6,7 @@ SUPABASE_URL = os.environ.get(
 SUPABASE_SERVICE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
 
 BASE_URL = "https://zakaz.altacera.ru/load"
-TARGET_REGION = "Самарская область"
+TARGET_REGION = "Самарская обл"
 
 # Режим прогона: True — ничего не удаляем и не пишем (только смотрим логи)
 DRY_RUN = True

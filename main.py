@@ -51,20 +51,19 @@ def download_and_extract():
 
 # ========== 4. Параметры Самары ==========
 def get_territory_params(territory_data):
-    print("=== Все территории, содержащие «Самар» ===")
+    print("=== Все территории (полный список) ===")
     for t in territory_data:
-        for area in t.get("territory", []):
-            if "самар" in area.get("area", "").lower():
-                print(
-                    f"  area={area['area']!r} | "
-                    f"price_list={t.get('price_list')!r} | "
-                    f"type_price={t.get('type_price')!r} | "
-                    f"depot={t.get('depot')!r} | "
-                    f"type_price_id={t['type_price_id']} | "
-                    f"depot_id={t['depot_id']}"
-                )
+        areas = ", ".join(a.get("area", "") for a in t.get("territory", []))
+        print(
+            f"  price_list={t.get('price_list')!r} | "
+            f"type_price={t.get('type_price')!r} | "
+            f"depot={t.get('depot')!r} | "
+            f"price_id={t['type_price_id']} | "
+            f"depot_id={t['depot_id']} | "
+            f"areas=[{areas}]"
+        )
 
-    # Дальше ищем рабочую территорию по точному имени
+    # дальше — поиск (пока по точному имени)
     for t in territory_data:
         for area in t.get("territory", []):
             if area.get("area") == TARGET_REGION:
