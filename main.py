@@ -1,5 +1,15 @@
 """
 main.py — синхронизация каталога с AltaCera (Самарская область).
+
+Режимы:
+  DRY_RUN = True  — только логи, ничего не пишем и не удаляем
+  DRY_RUN = False — реальное удаление совпадающих и upsert новых
+
+Диагностика:
+  В начале работы выводит:
+    - Все территории (полный список)
+    - Остатки по складам (free_balance > 0)
+    - Цены по прайсам
 """
 
 import csv
@@ -7,6 +17,7 @@ import io
 import json
 import re
 import zipfile
+from collections import Counter
 from datetime import datetime
 
 import requests
@@ -18,9 +29,14 @@ from config import (
     BASE_URL,
     TARGET_REGION,
     DRY_RUN,
+    MANUAL_DEPOT_ID,
 )
 
 # ========== 1. Инициализация Supabase ==========
+print("SUPABASE_URL set:", bool(SUPABASE_URL))
+print("SERVICE_KEY set:", bool(SUPABASE_SERVICE_KEY))
+print("SERVICE_KEY len:", len(SUPABASE_SERVICE_KEY or ""))
+
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 # ========== 2. Список файлов API ==========
@@ -39,7 +55,7 @@ def download_and_extract():
     data = {}
     for fname in FILES:
         print(f"Скачиваю {fname}...")
-        r = requests.get(f"{BASE_URL}/{fname}", timeout=120)
+        r = requests.get(f"{BASE_URL}/{fname}", timeout=180)
         r.raise_for_status()
         with zipfile.ZipFile(io.BytesIO(r.content)) as z:
             json_name = z.namelist()[0]
@@ -49,8 +65,8 @@ def download_and_extract():
     return data
 
 
-# ========== 4. Параметры Самары ==========
-def get_territory_params(territory_data):
+# ========== 4. Диагностика ==========
+def debug_territories(territory_data):
     print("=== Все территории (полный список) ===")
     for t in territory_data:
         areas = ", ".join(a.get("area", "") for a in t.get("territory", []))
@@ -63,7 +79,51 @@ def get_territory_params(territory_data):
             f"areas=[{areas}]"
         )
 
-    # дальше — поиск (пока по точному имени)
+
+def debug_balances(data):
+    print("=== Остатки по складам (free_balance > 0) ===")
+    counter = Counter()
+    for b in data["balance"]:
+        if b.get("free_balance", 0) > 0:
+            counter[b["depot_id"]] += 1
+
+    depot_names = {t["depot_id"]: t.get("depot") for t in data["territory"]}
+    for depot_id, cnt in counter.most_common():
+        print(f"  {cnt:>7} позиций | {depot_names.get(depot_id, '(нет в territory)')} | {depot_id}")
+
+
+def debug_prices(data):
+    print("=== Цены по прайсам ===")
+    for pl in data["price"]:
+        cnt = len(pl["price_list"])
+        print(f"  {cnt:>7} позиций | price_id={pl['type_price_id']}")
+
+
+# ========== 5. Параметры Самары ==========
+def get_territory_params(territory_data):
+    """
+    Находим прайс по региону TARGET_REGION.
+    Склад берём либо из MANUAL_DEPOT_ID (если задан),
+    либо из территории (может быть неправильный — «списание» и т.п.).
+    """
+    price_id = None
+    for t in territory_data:
+        for area in t.get("territory", []):
+            if area.get("area") == TARGET_REGION:
+                price_id = t["type_price_id"]
+                break
+
+    if not price_id:
+        raise ValueError(f"Регион не найден: {TARGET_REGION}")
+
+    if MANUAL_DEPOT_ID:
+        print(f"Использую MANUAL_DEPOT_ID={MANUAL_DEPOT_ID}")
+        return {
+            "type_price_id": price_id,
+            "depot_id": MANUAL_DEPOT_ID,
+        }
+
+    # Если MANUAL_DEPOT_ID не задан — берём из территории (временно)
     for t in territory_data:
         for area in t.get("territory", []):
             if area.get("area") == TARGET_REGION:
@@ -71,10 +131,11 @@ def get_territory_params(territory_data):
                     "type_price_id": t["type_price_id"],
                     "depot_id": t["depot_id"],
                 }
-    raise ValueError(f"Регион не найден: {TARGET_REGION}")
+
+    raise ValueError(f"Не удалось определить depot_id для {TARGET_REGION}")
 
 
-# ========== 5. Извлечение размера регуляркой ==========
+# ========== 6. Извлечение размера ==========
 def extract_size(tovar_item):
     m = re.search(
         r"(\d+(?:[.,]\d+)?)\s*[\*x×]\s*(\d+(?:[.,]\d+)?)",
@@ -87,17 +148,17 @@ def extract_size(tovar_item):
     return None
 
 
-# ========== 6. Нормализация строк для сравнения ==========
+# ========== 7. Нормализация строк ==========
 def normalize(s: str) -> str:
     return " ".join((s or "").lower().split())
 
 
-# ========== 7. Сборка коллекций ==========
+# ========== 8. Сборка коллекций ==========
 def build_collections(data, price_id, depot_id):
     collections = {}
     tovars = {}
 
-    # 7.1 Бренды и коллекции
+    # 8.1 Бренды и коллекции
     for item in data["category"]:
         if item.get("deleted") or item.get("archive"):
             continue
@@ -111,7 +172,7 @@ def build_collections(data, price_id, depot_id):
             "has_keramogranit": False,
         }
 
-    # 7.2 Товары (фильтрация + привязка)
+    # 8.2 Товары
     for item in data["tovar"]:
         if item.get("deleted") or item.get("archive"):
             continue
@@ -141,7 +202,7 @@ def build_collections(data, price_id, depot_id):
         }
         collections[cat_id]["tovars"].append(item["tovar_id"])
 
-    # 7.3 Цены (только прайс Самары)
+    # 8.3 Цены (только прайс Самары)
     prices = {}
     for pl in data["price"]:
         if pl["type_price_id"] != price_id:
@@ -151,14 +212,14 @@ def build_collections(data, price_id, depot_id):
             if val > 0:
                 prices[p["tovar_id"]] = val
 
-    # 7.4 Остатки (только склад Самары)
+    # 8.4 Остатки (только выбранный склад)
     balances = {}
     for b in data["balance"]:
         if b["depot_id"] != depot_id:
             continue
         balances[b["tovar_id"]] = b["free_balance"]
 
-    # 7.5 Картинки
+    # 8.5 Картинки
     pictures = {}
     for pic in data["picture"]:
         pictures[pic["uid"]] = pic.get("images", [])
@@ -166,7 +227,7 @@ def build_collections(data, price_id, depot_id):
     return collections, tovars, prices, balances, pictures
 
 
-# ========== 8. Строки каталога ==========
+# ========== 9. Строки каталога ==========
 def build_catalog_rows(collections, tovars, prices, balances, pictures):
     rows = []
     for cat_id, col in collections.items():
@@ -177,7 +238,7 @@ def build_catalog_rows(collections, tovars, prices, balances, pictures):
             fb = balances.get(tid, 0)
             if fb <= 0:
                 continue
-            price = prices.get(tid)  # None, если в Самаре цены нет
+            price = prices.get(tid)
 
             t = tovars[tid]
             t["price"] = price
@@ -188,17 +249,11 @@ def build_catalog_rows(collections, tovars, prices, balances, pictures):
         if not valid_tovars:
             continue
 
-        # Цена коллекции — средняя по товарам с ценой
         valid_prices = [v["price"] for v in valid_tovars if v["price"]]
         col_price = round(sum(valid_prices) / len(valid_prices)) if valid_prices else None
 
-        # Размеры одной строкой
         size_str = ", ".join(sorted(col["sizes"]))
-
-        # Категория
         category = "keramogranit" if col["has_keramogranit"] else "plitka"
-
-        # Картинки коллекции
         col_images = pictures.get(cat_id, [])
 
         rows.append({
@@ -225,7 +280,7 @@ def build_catalog_rows(collections, tovars, prices, balances, pictures):
     return rows
 
 
-# ========== 9. Экспорт старых записей в CSV ==========
+# ========== 10. Экспорт старой базы в CSV ==========
 def export_old_to_csv():
     resp = (
         supabase.table("catalog")
@@ -245,7 +300,7 @@ def export_old_to_csv():
     print(f"Экспортировано {len(resp.data)} строк в {fname}")
 
 
-# ========== 10. Удаление совпадающих старых записей ==========
+# ========== 11. Удаление совпадающих старых ==========
 def delete_matched_old_rows(new_rows, dry_run=True):
     new_keys = {
         (normalize(r["name"]), normalize(r["collection"]))
@@ -286,7 +341,7 @@ def delete_matched_old_rows(new_rows, dry_run=True):
     return matched
 
 
-# ========== 11. Upsert новых ==========
+# ========== 12. Upsert ==========
 def upsert_catalog(rows):
     if not rows:
         print("Нет данных для записи")
@@ -299,11 +354,17 @@ def upsert_catalog(rows):
     print(f"Готово, вернулось {len(result.data)} записей")
 
 
-# ========== 12. Главный поток ==========
+# ========== 13. Главный поток ==========
 def main():
     print("=== Старт синхронизации AltaCera ===")
 
     data = download_and_extract()
+
+    # Диагностика
+    debug_territories(data["territory"])
+    debug_balances(data)
+    debug_prices(data)
+
     params = get_territory_params(data["territory"])
     print(f"Параметры Самары: price_id={params['type_price_id']}, depot_id={params['depot_id']}")
 
@@ -313,13 +374,9 @@ def main():
     rows = build_catalog_rows(collections, tovars, prices, balances, pictures)
     print(f"Новых строк к upsert: {len(rows)}")
 
-    # 1. Экспорт старых записей в CSV
     export_old_to_csv()
-
-    # 2. Удаление совпадающих старых
     delete_matched_old_rows(rows, dry_run=DRY_RUN)
 
-    # 3. Upsert новых (только если не DRY_RUN)
     if DRY_RUN:
         print("DRY_RUN = True — upsert пропущен.")
     else:
