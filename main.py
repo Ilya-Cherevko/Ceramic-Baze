@@ -6,16 +6,17 @@ main.py — синхронизация каталога с AltaCera (Самар�
   DRY_RUN = False — реальное удаление совпадающих и upsert новых
 
 Диагностика:
-  В начале работы выводит:
-    - Все территории (полный список)
-    - Остатки по складам (free_balance > 0)
-    - Цены по прайсам
+  - Все территории (полный список)
+  - Остатки по складам (free_balance > 0)
+  - Цены по прайсам
+  - Первые 5 пар из новой выгрузки и из старой базы (для сверки)
 """
 
 import csv
 import io
 import json
 import re
+import unicodedata
 import zipfile
 from collections import Counter
 from datetime import datetime
@@ -101,11 +102,6 @@ def debug_prices(data):
 
 # ========== 5. Параметры Самары ==========
 def get_territory_params(territory_data):
-    """
-    Находим прайс по региону TARGET_REGION.
-    Склад берём либо из MANUAL_DEPOT_ID (если задан),
-    либо из территории (может быть неправильный — «списание» и т.п.).
-    """
     price_id = None
     for t in territory_data:
         for area in t.get("territory", []):
@@ -123,7 +119,6 @@ def get_territory_params(territory_data):
             "depot_id": MANUAL_DEPOT_ID,
         }
 
-    # Если MANUAL_DEPOT_ID не задан — берём из территории (временно)
     for t in territory_data:
         for area in t.get("territory", []):
             if area.get("area") == TARGET_REGION:
@@ -138,7 +133,7 @@ def get_territory_params(territory_data):
 # ========== 6. Извлечение размера ==========
 def extract_size(tovar_item):
     m = re.search(
-        r"(\d+(?:[.,]\d+)?)\s*[\*x×]\s*(\d+(?:[.,]\d+)?)",
+        r"(\d+(?:[.,]\d+)?)\s*[\*x×х]\s*(\d+(?:[.,]\d+)?)",
         tovar_item.get("tovar", "")
     )
     if m:
@@ -150,7 +145,36 @@ def extract_size(tovar_item):
 
 # ========== 7. Нормализация строк ==========
 def normalize(s: str) -> str:
-    return " ".join((s or "").lower().split())
+    """Нижний регистр, схлопывание пробелов, ё→е, удаление неразрывных пробелов."""
+    s = (s or "").lower().strip()
+    s = unicodedata.normalize("NFKC", s)
+    s = s.replace("ё", "е")
+    return " ".join(s.split())
+
+
+def normalize_collection_name(raw: str) -> str:
+    """
+    Из строки вида 'Алмонд / Almond 200*900' делает 'Almond'.
+    Убирает кириллический дубль и размер в конце.
+    """
+    if not raw:
+        return ""
+    s = raw.strip()
+
+    # 1. Если есть ' / ' — берём часть после последнего слэша
+    if " / " in s:
+        s = s.split(" / ")[-1]
+
+    # 2. Убираем размер в конце: ' 200*900', ' 600x600', ' 20х40' и т.п.
+    s = re.sub(
+        r"\s*\d+(?:[.,]\d+)?\s*[\*x×х]\s*\d+(?:[.,]\d+)?\s*$",
+        "",
+        s,
+    )
+
+    # 3. Схлопываем пробелы
+    s = " ".join(s.split())
+    return s.strip()
 
 
 # ========== 8. Сборка коллекций ==========
@@ -162,10 +186,13 @@ def build_collections(data, price_id, depot_id):
     for item in data["category"]:
         if item.get("deleted") or item.get("archive"):
             continue
+        raw_collection = item["category"]
+        clean_collection = normalize_collection_name(raw_collection)
         collections[item["category_id"]] = {
             "brand_id": item["parent_id"],
             "brand": item["parent"],
-            "collection": item["category"],
+            "collection": clean_collection,
+            "collection_raw": raw_collection,
             "category_id": item["category_id"],
             "tovars": [],
             "sizes": set(),
@@ -308,6 +335,10 @@ def delete_matched_old_rows(new_rows, dry_run=True):
     }
     print(f"Пар (name, collection) в новой выгрузке: {len(new_keys)}")
 
+    print("=== Первые 5 пар из новой выгрузки ===")
+    for k in list(new_keys)[:5]:
+        print(f"  {k!r}")
+
     resp = (
         supabase.table("catalog")
         .select("id, name, collection")
@@ -316,6 +347,10 @@ def delete_matched_old_rows(new_rows, dry_run=True):
     )
     old_rows = resp.data
     print(f"Старых записей без supplier_category_id: {len(old_rows)}")
+
+    print("=== Первые 5 пар из старой базы ===")
+    for row in old_rows[:5]:
+        print(f"  {(normalize(row['name']), normalize(row['collection']))!r}")
 
     matched = [
         row for row in old_rows
@@ -360,7 +395,6 @@ def main():
 
     data = download_and_extract()
 
-    # Диагностика
     debug_territories(data["territory"])
     debug_balances(data)
     debug_prices(data)
@@ -373,6 +407,16 @@ def main():
     )
     rows = build_catalog_rows(collections, tovars, prices, balances, pictures)
     print(f"Новых строк к upsert: {len(rows)}")
+
+    print("=== Примеры собранных коллекций ===")
+    for r in rows[:5]:
+        tv = json.loads(r["tovars"])
+        it = json.loads(r["interiors"])
+        print(
+            f"  {r['name']} | {r['collection']} | category={r['category']} | "
+            f"size={r['size'][:60]} | price={r['price']} | "
+            f"tovars={len(tv)} | interiors={len(it)}"
+        )
 
     export_old_to_csv()
     delete_matched_old_rows(rows, dry_run=DRY_RUN)
