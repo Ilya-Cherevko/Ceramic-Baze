@@ -1,15 +1,5 @@
 """
 main.py — синхронизация каталога с AltaCera (Самарская область).
-
-Режимы:
-  DRY_RUN = True  — только логи, ничего не пишем и не удаляем
-  DRY_RUN = False — реальное удаление совпадающих и upsert новых
-
-Диагностика:
-  - Все территории (полный список)
-  - Остатки по складам (free_balance > 0)
-  - Цены по прайсам
-  - Первые 5 пар из новой выгрузки и из старой базы (для сверки)
 """
 
 import csv
@@ -114,18 +104,12 @@ def get_territory_params(territory_data):
 
     if MANUAL_DEPOT_ID:
         print(f"Использую MANUAL_DEPOT_ID={MANUAL_DEPOT_ID}")
-        return {
-            "type_price_id": price_id,
-            "depot_id": MANUAL_DEPOT_ID,
-        }
+        return {"type_price_id": price_id, "depot_id": MANUAL_DEPOT_ID}
 
     for t in territory_data:
         for area in t.get("territory", []):
             if area.get("area") == TARGET_REGION:
-                return {
-                    "type_price_id": t["type_price_id"],
-                    "depot_id": t["depot_id"],
-                }
+                return {"type_price_id": t["type_price_id"], "depot_id": t["depot_id"]}
 
     raise ValueError(f"Не удалось определить depot_id для {TARGET_REGION}")
 
@@ -143,38 +127,41 @@ def extract_size(tovar_item):
     return None
 
 
-# ========== 7. Нормализация строк ==========
+# ========== 7. Нормализация ==========
 def normalize(s: str) -> str:
-    """Нижний регистр, схлопывание пробелов, ё→е, удаление неразрывных пробелов."""
+    """Для сравнения: нижний регистр, NFKC, ё→е, удаление ВСЕХ пробелов."""
     s = (s or "").lower().strip()
     s = unicodedata.normalize("NFKC", s)
     s = s.replace("ё", "е")
-    return " ".join(s.split())
+    s = re.sub(r"\s+", "", s)
+    return s
 
 
 def normalize_collection_name(raw: str) -> str:
     """
-    Из строки вида 'Алмонд / Almond 200*900' делает 'Almond'.
-    Убирает кириллический дубль и размер в конце.
+    'Алмонд / Almond 200*900' → 'Almond'
+    'Jast (керамогранит)'     → 'Jast'
     """
     if not raw:
         return ""
     s = raw.strip()
 
-    # 1. Если есть ' / ' — берём часть после последнего слэша
+    # 1. Кириллица / латиница → берём латиницу
     if " / " in s:
         s = s.split(" / ")[-1]
 
-    # 2. Убираем размер в конце: ' 200*900', ' 600x600', ' 20х40' и т.п.
+    # 2. Убираем размер в конце
+    s = re.sub(r"\s*\d+(?:[.,]\d+)?\s*[\*x×х]\s*\d+(?:[.,]\d+)?\s*$", "", s)
+
+    # 3. Убираем суффикс-категорию в скобках
     s = re.sub(
-        r"\s*\d+(?:[.,]\d+)?\s*[\*x×х]\s*\d+(?:[.,]\d+)?\s*$",
+        r"\s*\((?:керамогранит|плитка|керамика|мозаика)\)\s*$",
         "",
         s,
+        flags=re.IGNORECASE,
     )
 
-    # 3. Схлопываем пробелы
-    s = " ".join(s.split())
-    return s.strip()
+    return " ".join(s.split()).strip()
 
 
 # ========== 8. Сборка коллекций ==========
@@ -182,10 +169,17 @@ def build_collections(data, price_id, depot_id):
     collections = {}
     tovars = {}
 
-    # 8.1 Бренды и коллекции
+    # 8.1 Бренды и коллекции — только is_folder=False и с заполненным parent
+    skipped_folders = 0
     for item in data["category"]:
         if item.get("deleted") or item.get("archive"):
             continue
+        if item.get("is_folder"):
+            skipped_folders += 1
+            continue
+        if not item.get("parent") or not item.get("parent_id"):
+            continue
+
         raw_collection = item["category"]
         clean_collection = normalize_collection_name(raw_collection)
         collections[item["category_id"]] = {
@@ -198,6 +192,9 @@ def build_collections(data, price_id, depot_id):
             "sizes": set(),
             "has_keramogranit": False,
         }
+
+    print(f"Пропущено папок (is_folder=True): {skipped_folders}")
+    print(f"Коллекций после фильтра: {len(collections)}")
 
     # 8.2 Товары
     for item in data["tovar"]:
@@ -239,7 +236,7 @@ def build_collections(data, price_id, depot_id):
             if val > 0:
                 prices[p["tovar_id"]] = val
 
-    # 8.4 Остатки (только выбранный склад)
+    # 8.4 Остатки
     balances = {}
     for b in data["balance"]:
         if b["depot_id"] != depot_id:
@@ -307,7 +304,7 @@ def build_catalog_rows(collections, tovars, prices, balances, pictures):
     return rows
 
 
-# ========== 10. Экспорт старой базы в CSV ==========
+# ========== 10. Экспорт старой базы ==========
 def export_old_to_csv():
     resp = (
         supabase.table("catalog")
@@ -316,7 +313,7 @@ def export_old_to_csv():
         .execute()
     )
     if not resp.data:
-        print("Нечего экспортировать (нет записей без supplier_category_id).")
+        print("Нечего экспортировать.")
         return
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     fname = f"old_catalog_backup_{ts}.csv"
@@ -409,7 +406,7 @@ def main():
     print(f"Новых строк к upsert: {len(rows)}")
 
     print("=== Примеры собранных коллекций ===")
-    for r in rows[:5]:
+    for r in rows[:8]:
         tv = json.loads(r["tovars"])
         it = json.loads(r["interiors"])
         print(
