@@ -1,5 +1,9 @@
 """
 main.py — синхронизация каталога с AltaCera (Самарская область).
+
+Режимы:
+  DRY_RUN = True  — только логи, ничего не пишем и не удаляем
+  DRY_RUN = False — реальное удаление совпадающих и upsert новых
 """
 
 import csv
@@ -332,10 +336,6 @@ def delete_matched_old_rows(new_rows, dry_run=True):
     }
     print(f"Пар (name, collection) в новой выгрузке: {len(new_keys)}")
 
-    print("=== Первые 5 пар из новой выгрузки ===")
-    for k in list(new_keys)[:5]:
-        print(f"  {k!r}")
-
     resp = (
         supabase.table("catalog")
         .select("id, name, collection")
@@ -345,20 +345,28 @@ def delete_matched_old_rows(new_rows, dry_run=True):
     old_rows = resp.data
     print(f"Старых записей без supplier_category_id: {len(old_rows)}")
 
-    print("=== Первые 5 пар из старой базы ===")
-    for row in old_rows[:5]:
-        print(f"  {(normalize(row['name']), normalize(row['collection']))!r}")
-
     matched = [
         row for row in old_rows
         if (normalize(row["name"]), normalize(row["collection"])) in new_keys
     ]
 
     print(f"К удалению (совпали с AltaCera): {len(matched)}")
+
+    # Экспорт удаляемых в CSV — для ревью
     if matched:
-        print("Примеры:")
-        for row in matched[:20]:
-            print(f"  id={row['id']} | {row['name']} | {row['collection']}")
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        fname = f"to_delete_{ts}.csv"
+        with open(fname, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=["id", "name", "collection"])
+            writer.writeheader()
+            writer.writerows(matched)
+        print(f"Список к удалению выгружен в {fname}")
+
+    # Сводка по брендам
+    brand_counts = Counter(row["name"] for row in matched)
+    print("Удаляемые по брендам:")
+    for brand, cnt in brand_counts.most_common():
+        print(f"  {cnt:>4} | {brand}")
 
     if dry_run:
         print("DRY_RUN = True — удаление пропущено.")

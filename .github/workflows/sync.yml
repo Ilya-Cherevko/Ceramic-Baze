@@ -31,4 +31,5 @@ jobs:
         with:
           name: old-catalog-backup
           path: old_catalog_backup_*.csv
+                to_delete_*.csv
           if-no-files-found: ignore
