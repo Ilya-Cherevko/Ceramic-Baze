@@ -404,6 +404,31 @@ def main():
     debug_balances(data)
     debug_prices(data)
 
+    # === Диагностика брендов ===
+    from collections import Counter
+    print("=== Уникальные parent (бренды) в category_json ===")
+    brand_counter = Counter(
+        item.get("parent", "")
+        for item in data["category"]
+        if not item.get("is_folder")
+           and not item.get("deleted")
+           and not item.get("archive")
+           and item.get("parent")
+    )
+    for brand, cnt in brand_counter.most_common():
+        print(f"  {cnt:>4} | {brand}")
+
+    print("=== Уникальные collection_item в tovar_json ===")
+    item_counter = Counter(
+        item.get("collection_item", "")
+        for item in data["tovar"]
+        if not item.get("deleted")
+           and not item.get("archive")
+           and not item.get("not_unload_site")
+    )
+    for ci, cnt in item_counter.most_common():
+        print(f"  {cnt:>6} | {ci!r}")
+
     params = get_territory_params(data["territory"])
     print(f"Параметры Самары: price_id={params['type_price_id']}, depot_id={params['depot_id']}")
 
