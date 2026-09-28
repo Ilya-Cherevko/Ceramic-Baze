@@ -14,4 +14,4 @@ TARGET_REGION = "Самарская обл"
 MANUAL_DEPOT_ID = "d1666584-d536-11ec-80f8-00155d5d5700"
 
 # True — только логи, ничего не пишем и не удаляем
-DRY_RUN = True
+DRY_RUN = False

@@ -3,7 +3,7 @@ name: Sync AltaCera Catalog
 on:
   schedule:
     # 02:30 UTC = 05:30 МСК (AltaCera генерит данные в 02:00 МСК, +30 мин буфер)
-    - cron: "30 2 * * *"
+     #   - cron: "30 2 * * *"
   workflow_dispatch:
 
 jobs:
