@@ -25,6 +25,7 @@ from config import (
     TARGET_REGION,
     DRY_RUN,
     MANUAL_DEPOT_ID,
+    SUPPLIER_ID,
 )
 
 # ========== 1. Инициализация Supabase ==========
@@ -288,6 +289,7 @@ def build_catalog_rows(collections, tovars, prices, balances, pictures):
         col_images = pictures.get(cat_id, [])
 
         rows.append({
+            "supplier_id": SUPPLIER_ID,
             "supplier_category_id": cat_id,
             "supplier_parent_id": col["brand_id"],
             "country": "Россия",
@@ -316,7 +318,7 @@ def export_old_to_csv():
     resp = (
         supabase.table("catalog")
         .select("*")
-        .is_("supplier_category_id", "null")
+        .is_("supplier_id", "null")
         .execute()
     )
     if not resp.data:
@@ -342,7 +344,7 @@ def delete_matched_old_rows(new_rows, dry_run=True):
     resp = (
         supabase.table("catalog")
         .select("id, name, collection")
-        .is_("supplier_category_id", "null")
+        .is_("supplier_id", "null")
         .execute()
     )
     old_rows = resp.data
@@ -440,6 +442,7 @@ def main():
     )
     rows = build_catalog_rows(collections, tovars, prices, balances, pictures)
     print(f"Новых строк к upsert: {len(rows)}")
+    print(f"Пример supplier_id в первой строке: {rows[0].get('supplier_id')}")
 
         # Сводка по категориям
     from collections import Counter as C
