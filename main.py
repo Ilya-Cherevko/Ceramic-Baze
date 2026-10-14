@@ -218,7 +218,10 @@ def build_collections(data, price_id, depot_id):
             collections[cat_id]["sizes"].add(size_str)
 
         tovar_name = item.get("tovar", "")
-        if "керамогранит" in tovar_name.lower():
+
+        # Категория — по collection_item, а не по названию товара
+        collection_item = (item.get("collection_item") or "").lower()
+        if "керамогранит" in collection_item:
             collections[cat_id]["has_keramogranit"] = True
 
         tovars[item["tovar_id"]] = {
