@@ -284,7 +284,7 @@ def build_catalog_rows(collections, tovars, prices, balances, pictures):
         col_price = round(sum(valid_prices) / len(valid_prices)) if valid_prices else None
 
         size_str = ", ".join(sorted(col["sizes"]))
-        category = "keramogranit" if col["has_keramogranit"] else "plitka"
+        category = "Keramogranit" if col["has_keramogranit"] else "Plitka"
         col_images = pictures.get(cat_id, [])
 
         rows.append({
