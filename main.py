@@ -441,6 +441,13 @@ def main():
     rows = build_catalog_rows(collections, tovars, prices, balances, pictures)
     print(f"Новых строк к upsert: {len(rows)}")
 
+        # Сводка по категориям
+    from collections import Counter as C
+    cat_counter = C(r["category"] for r in rows)
+    print("=== Сводка по категориям в новых строках ===")
+    for c, n in cat_counter.most_common():
+        print(f"  {n:>4} | {c}")
+
     print("=== Примеры собранных коллекций ===")
     for r in rows[:8]:
         tv = json.loads(r["tovars"])
