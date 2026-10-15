@@ -4,6 +4,10 @@ main.py — синхронизация каталога с AltaCera (Самар�
 Режимы:
   DRY_RUN = True  — только логи, ничего не пишем и не удаляем
   DRY_RUN = False — реальное удаление совпадающих и upsert новых
+
+Картинки:
+  - Если URL есть в vk_uploaded.json — пишем VK-URL
+  - Иначе — оставляем URL AltaCera (fallback)
 """
 
 import csv
@@ -14,6 +18,7 @@ import unicodedata
 import zipfile
 from collections import Counter
 from datetime import datetime
+from pathlib import Path
 
 import requests
 from supabase import create_client, Client
@@ -35,7 +40,28 @@ print("SERVICE_KEY len:", len(SUPABASE_SERVICE_KEY or ""))
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
-# ========== 2. Список файлов API ==========
+# ========== 2. VK-кеш (какие картинки уже загружены в VK) ==========
+VK_CACHE_FILE = "vk_uploaded.json"
+VK_PUBLIC_PREFIX = "https://ceramic-images.hb.ru-msk.vkcloud-storage.ru"
+
+vk_cache = {}   # URL источника → ключ в VK
+if Path(VK_CACHE_FILE).exists():
+    with open(VK_CACHE_FILE, "r", encoding="utf-8") as f:
+        vk_cache = json.load(f)
+    print(f"VK-кеш загружен: {len(vk_cache)} записей")
+else:
+    print(f"VK-кеш НЕ найден ({VK_CACHE_FILE}) — все картинки останутся с URL AltaCera")
+
+
+def vk_url(original_url: str) -> str:
+    """Возвращает VK-URL, если картинка уже загружена. Иначе — исходный."""
+    key = vk_cache.get(original_url)
+    if key:
+        return f"{VK_PUBLIC_PREFIX}/{key}"
+    return original_url
+
+
+# ========== 3. Список файлов API ==========
 FILES = [
     "territory_json.zip",
     "category_json.zip",
@@ -46,7 +72,6 @@ FILES = [
 ]
 
 
-# ========== 3. Скачивание и распаковка ==========
 def download_and_extract():
     data = {}
     for fname in FILES:
@@ -134,7 +159,6 @@ def extract_size(tovar_item):
 
 # ========== 7. Нормализация ==========
 def normalize(s: str) -> str:
-    """Для сравнения: нижний регистр, NFKC, ё→е, удаление ВСЕХ пробелов."""
     s = (s or "").lower().strip()
     s = unicodedata.normalize("NFKC", s)
     s = s.replace("ё", "е")
@@ -143,29 +167,18 @@ def normalize(s: str) -> str:
 
 
 def normalize_collection_name(raw: str) -> str:
-    """
-    'Алмонд / Almond 200*900' → 'Almond'
-    'Jast (керамогранит)'     → 'Jast'
-    """
     if not raw:
         return ""
     s = raw.strip()
-
-    # 1. Кириллица / латиница → берём латиницу
     if " / " in s:
         s = s.split(" / ")[-1]
-
-    # 2. Убираем размер в конце
     s = re.sub(r"\s*\d+(?:[.,]\d+)?\s*[\*x×х]\s*\d+(?:[.,]\d+)?\s*$", "", s)
-
-    # 3. Убираем суффикс-категорию в скобках
     s = re.sub(
         r"\s*\((?:керамогранит|плитка|керамика|мозаика)\)\s*$",
         "",
         s,
         flags=re.IGNORECASE,
     )
-
     return " ".join(s.split()).strip()
 
 
@@ -174,7 +187,7 @@ def build_collections(data, price_id, depot_id):
     collections = {}
     tovars = {}
 
-    # 8.1 Бренды и коллекции — только is_folder=False и с заполненным parent
+    # 8.1 Бренды и коллекции
     skipped_folders = 0
     for item in data["category"]:
         if item.get("deleted") or item.get("archive"):
@@ -220,7 +233,6 @@ def build_collections(data, price_id, depot_id):
 
         tovar_name = item.get("tovar", "")
 
-        # Категория — по collection_item, а не по названию товара
         collection_item = (item.get("collection_item") or "").lower()
         if "керамогранит" in collection_item:
             collections[cat_id]["has_keramogranit"] = True
@@ -234,7 +246,7 @@ def build_collections(data, price_id, depot_id):
         }
         collections[cat_id]["tovars"].append(item["tovar_id"])
 
-    # 8.3 Цены (только прайс Самары)
+    # 8.3 Цены
     prices = {}
     for pl in data["price"]:
         if pl["type_price_id"] != price_id:
@@ -262,6 +274,9 @@ def build_collections(data, price_id, depot_id):
 # ========== 9. Строки каталога ==========
 def build_catalog_rows(collections, tovars, prices, balances, pictures):
     rows = []
+    vk_replaced = 0
+    vk_fallback = 0
+
     for cat_id, col in collections.items():
         valid_tovars = []
         for tid in col["tovars"]:
@@ -275,7 +290,19 @@ def build_catalog_rows(collections, tovars, prices, balances, pictures):
             t = tovars[tid]
             t["price"] = price
             t["free_balance"] = fb
-            t["images"] = pictures.get(tid, [])
+
+            # Заменяем URL картинок на VK (если есть в кеше)
+            raw_images = pictures.get(tid, [])
+            vk_images = []
+            for u in raw_images:
+                vk_u = vk_url(u)
+                if vk_u != u:
+                    vk_replaced += 1
+                else:
+                    vk_fallback += 1
+                vk_images.append(vk_u)
+            t["images"] = vk_images
+
             valid_tovars.append(t)
 
         if not valid_tovars:
@@ -286,7 +313,17 @@ def build_catalog_rows(collections, tovars, prices, balances, pictures):
 
         size_str = ", ".join(sorted(col["sizes"]))
         category = "Keramogranit" if col["has_keramogranit"] else "Plitka"
-        col_images = pictures.get(cat_id, [])
+
+        # Интерьеры коллекции тоже через VK
+        raw_col_images = pictures.get(cat_id, [])
+        col_images = []
+        for u in raw_col_images:
+            vk_u = vk_url(u)
+            if vk_u != u:
+                vk_replaced += 1
+            else:
+                vk_fallback += 1
+            col_images.append(vk_u)
 
         rows.append({
             "supplier_id": SUPPLIER_ID,
@@ -309,6 +346,10 @@ def build_catalog_rows(collections, tovars, prices, balances, pictures):
             } for v in valid_tovars], ensure_ascii=False),
             "interiors": json.dumps(col_images, ensure_ascii=False),
         })
+
+    print(f"=== Замена URL на VK ===")
+    print(f"  Заменено на VK:     {vk_replaced}")
+    print(f"  Осталось AltaCera:  {vk_fallback}")
 
     return rows
 
@@ -348,7 +389,7 @@ def delete_matched_old_rows(new_rows, dry_run=True):
         .execute()
     )
     old_rows = resp.data
-    print(f"Старых записей без supplier_category_id: {len(old_rows)}")
+    print(f"Старых записей без supplier_id: {len(old_rows)}")
 
     matched = [
         row for row in old_rows
@@ -357,7 +398,6 @@ def delete_matched_old_rows(new_rows, dry_run=True):
 
     print(f"К удалению (совпали с AltaCera): {len(matched)}")
 
-    # Экспорт удаляемых в CSV — для ревью
     if matched:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         fname = f"to_delete_{ts}.csv"
@@ -367,7 +407,6 @@ def delete_matched_old_rows(new_rows, dry_run=True):
             writer.writerows(matched)
         print(f"Список к удалению выгружен в {fname}")
 
-    # Сводка по брендам
     brand_counts = Counter(row["name"] for row in matched)
     print("Удаляемые по брендам:")
     for brand, cnt in brand_counts.most_common():
@@ -392,11 +431,18 @@ def upsert_catalog(rows):
         print("Нет данных для записи")
         return
     print(f"Пишу {len(rows)} записей...")
-    result = supabase.table("catalog").upsert(
-        rows,
-        on_conflict="supplier_category_id"
-    ).execute()
-    print(f"Готово, вернулось {len(result.data)} записей")
+
+    # Upsert пачками по 100 — чтобы не упираться в лимиты
+    total = 0
+    for i in range(0, len(rows), 100):
+        chunk = rows[i:i + 100]
+        result = supabase.table("catalog").upsert(
+            chunk,
+            on_conflict="supplier_category_id"
+        ).execute()
+        total += len(result.data)
+        print(f"  записано {total} / {len(rows)}")
+    print(f"Готово, вернулось {total} записей")
 
 
 # ========== 13. Главный поток ==========
@@ -409,31 +455,6 @@ def main():
     debug_balances(data)
     debug_prices(data)
 
-    # === Диагностика брендов ===
-    from collections import Counter
-    print("=== Уникальные parent (бренды) в category_json ===")
-    brand_counter = Counter(
-        item.get("parent", "")
-        for item in data["category"]
-        if not item.get("is_folder")
-           and not item.get("deleted")
-           and not item.get("archive")
-           and item.get("parent")
-    )
-    for brand, cnt in brand_counter.most_common():
-        print(f"  {cnt:>4} | {brand}")
-
-    print("=== Уникальные collection_item в tovar_json ===")
-    item_counter = Counter(
-        item.get("collection_item", "")
-        for item in data["tovar"]
-        if not item.get("deleted")
-           and not item.get("archive")
-           and not item.get("not_unload_site")
-    )
-    for ci, cnt in item_counter.most_common():
-        print(f"  {cnt:>6} | {ci!r}")
-
     params = get_territory_params(data["territory"])
     print(f"Параметры Самары: price_id={params['type_price_id']}, depot_id={params['depot_id']}")
 
@@ -442,12 +463,10 @@ def main():
     )
     rows = build_catalog_rows(collections, tovars, prices, balances, pictures)
     print(f"Новых строк к upsert: {len(rows)}")
-    print(f"Пример supplier_id в первой строке: {rows[0].get('supplier_id')}")
 
-        # Сводка по категориям
-    from collections import Counter as C
-    cat_counter = C(r["category"] for r in rows)
-    print("=== Сводка по категориям в новых строках ===")
+    # Сводка по категориям
+    cat_counter = Counter(r["category"] for r in rows)
+    print("=== Сводка по категориям ===")
     for c, n in cat_counter.most_common():
         print(f"  {n:>4} | {c}")
 
