@@ -17,4 +17,4 @@ MANUAL_DEPOT_ID = "d1666584-d536-11ec-80f8-00155d5d5700"
 SUPPLIER_ID = 1   # altacera
 
 # True — только логи, ничего не пишем и не удаляем
-DRY_RUN = True
+DRY_RUN = False
